@@ -1,0 +1,36 @@
+services:
+  jobspy-scraper:
+    build:
+      context: ./jobspy
+      dockerfile: Dockerfile
+    image: jobspy
+    container_name: jobspy-scraper
+    command: tail -f /dev/null
+    env_file: .env
+    networks:
+      - jobspy-network
+
+  jobspy-mcp-server:
+    image: node:18-alpine
+    container_name: jobspy-mcp
+    restart: unless-stopped
+    ports:
+      - "${JOBSPY_PORT:-9423}:9423"
+    env_file: .env
+    working_dir: /app
+    volumes:
+      # Mount the entire repo so the Node server can access src/, jobspy/, etc.
+      - .:/app
+      # Docker socket so Node server can run "docker run jobspy ..." for scraping
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: >
+      sh -c "
+        npm install --omit=dev &&
+        node src/index.js
+      "
+    networks:
+      - jobspy-network
+
+networks:
+  jobspy-network:
+    driver: bridge

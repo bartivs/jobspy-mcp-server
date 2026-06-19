@@ -12,9 +12,8 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude to 
 
 ## Prerequisites
 
-- Node.js 16+
-- Python 3.6+
-- The JobSpy tool installed and available
+- Node.js 18+
+- Docker (for running the JobSpy scraper inside a container)
 
 ## Installation
 
@@ -26,66 +25,44 @@ cd jobspy-mcp-server
 # Install dependencies
 npm install
 
-# Make sure the JobSpy tool is properly set up
-cd ../jobSpy
-pip install -r requirements.txt
-chmod +x run.sh
+# Build the JobSpy Docker image
+docker compose build jobspy-scraper
 ```
 
 ## Configuration
 
-The server will automatically try to locate the JobSpy script in standard locations:
-- `../jobSpy/run.sh` (relative to the server directory)
-- `./run.sh` (in the current directory)
-- `/app/run.sh` (for Docker environments)
-
 ### Environment Variables
 
-You can configure the server using the following environment variables:
+| Variable              | Description                          | Default            |
+|-----------------------|--------------------------------------|--------------------|
+| `ENABLE_SSE`          | Use SSE transport (vs stdio)         | `0`                |
+| `JOBSPY_PORT`         | HTTP server port (SSE mode)          | `9423`             |
+| `JOBSPY_HOST`         | HTTP server host (SSE mode)          | `0.0.0.0`          |
+| `JOBSPY_DOCKER_IMAGE` | Docker image tag for JobSpy scraper  | `jobspy`           |
+| `LOG_LEVEL`           | Winston log level                    | `info`             |
 
-| Environment Variable    | Description                              | Default     |
-|-------------------------|------------------------------------------|-------------|
-| `JOBSPY_DOCKER_IMAGE`   | Docker image to use for JobSpy           | `jobspy`    |
-| `JOBSPY_ACCESS_TOKEN`   | Access token for JobSpy API (if required)| none        |
-| `PORT`                  | Port for the MCP server                  | `9423`      |
-| `HOST`                  | Host for HTTP server                     | '0.0.0.0'   |
-| `ENABLE_SSE`            | Enable Server-Sent Events transport      | 0        |
-
-## Setting Up Configuration
-
-You can set these configuration values in multiple ways:
-
-### 1. Using environment variables directly
-
-```bash
-export JOBSPY_DOCKER_IMAGE=jobspy
-export JOBSPY_HOST='0.0.0.0'
-export JOBSPY_PORT=9423
-export ENABLE_SSE=1
-```
-
-### 2. Using a .env file
-
-Create a `.env` file in the root directory with your configuration:
-
-```
-JOBSPY_DOCKER_IMAGE=jobspy
-JOBSPY_HOST='0.0.0.0'
-JOBSPY_PORT=9423
-ENABLE_SSE=1
-```
+Defaults are in `.env` (committed).
 
 ## Usage
 
-### Starting the server
+### Docker Compose (recommended for SSE)
 
 ```bash
-npm start
+docker compose up -d
 ```
 
-### Connecting with Claude Desktop
+The server listens on `http://localhost:9423`. The `jobspy-scraper` container stays alive and the Node server calls it on-demand via `docker run --rm jobspy` through the mounted Docker socket.
 
-Add the following to your Claude Desktop config file (typically at `~/Library/Application Support/Claude/claude_desktop_config.json`):
+### Direct (for Claude Desktop stdio)
+
+```bash
+npm start       # ENABLE_SSE=0
+npm run dev     # nodemon with auto-restart
+```
+
+## Connecting external apps
+
+### Claude Desktop (stdio)
 
 ```json
 {
@@ -94,78 +71,82 @@ Add the following to your Claude Desktop config file (typically at `~/Library/Ap
       "command": "node",
       "args": ["/path/to/jobspy-mcp-server/src/index.js"],
       "env": {
-        "ENABLE_SSE": 0
+        "ENABLE_SSE": "0"
       }
     }
   }
 }
 ```
 
-### Using with Web Clients (SSE Transport)
+### Claude Code (SSE)
 
-The server exposes HTTP endpoints that allow web applications to interact with the JobSpy MCP server:
-
-- **Connect for updates**: `GET /mcp/connect`
-  - Establishes a Server-Sent Events (SSE) connection for real-time updates
-  - Returns progress updates and job search results
-
-- **Send requests**: `POST /mcp/request`
-  - Accepts tool invocation requests in MCP format
-  - Returns tool responses
-
-Example JavaScript client for browser:
-
-```javascript
-// Connect to SSE endpoint
-const eventSource = new EventSource('http://localhost:9423/mcp/connect');
-
-// Listen for updates
-eventSource.onmessage = function(event) {
-  const data = JSON.parse(event.data);
-  console.log('Received update:', data);
-  
-  // Handle progress updates
-  if (data.type === 'progress') {
-    updateProgressBar(data.progress);
+```json
+{
+  "mcpServers": {
+    "jobspy": {
+      "type": "sse",
+      "url": "http://localhost:9423/sse"
+    }
   }
-};
-
-// Send a search request
-async function searchJobs() {
-  const response = await fetch('http://localhost:9423/mcp/request', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      tool: 'search_jobs',
-      params: {
-        search_term: 'software engineer',
-        location: 'San Francisco, CA',
-        site_names: 'indeed,linkedin'
-      }
-    })
-  });
-  
-  return await response.json();
 }
 ```
 
-### API Usage
+### LiteLLM
 
-The server exposes the following endpoints:
-
-#### Search Jobs
-
+```yaml
+# config.yaml
+model_list:
+  - model_name: jobspy
+    litellm_params:
+      model: mcp
+      mcp_servers:
+        jobspy:
+          transport: sse
+          url: http://host.docker.internal:9423/sse
 ```
-GET /search
+
+LiteLLM connects via SSE and can call `search_jobs` as a tool through the OpenAI-compatible `/chat/completions` endpoint.
+
+### curl (direct API)
+
+The `POST /api` endpoint bypasses the MCP protocol and returns results directly:
+
+```bash
+curl -X POST http://localhost:9423/api \
+  -H "Content-Type: application/json" \
+  -d '{
+    "search_term": "software engineer",
+    "location": "San Francisco, CA",
+    "site_names": "indeed,linkedin",
+    "results_wanted": 5
+  }'
 ```
 
-Query parameters:
-- `site_names`: Comma-separated list of job sites to search
-- `search_term`: Term to search for
-- `location`: Job location
-- And other JobSpy parameters as needed
+### Web clients (MCP SSE)
+
+The server exposes standard MCP SSE endpoints:
+
+| Endpoint         | Purpose                                      |
+|------------------|----------------------------------------------|
+| `GET /sse`       | SSE connection stream (MCP transport)        |
+| `POST /messages` | Send MCP JSON-RPC messages to the server     |
+| `POST /api`      | Direct JSON API (bypasses MCP)               |
+| `GET /health`    | Health check                                 |
+
+```javascript
+// Connect via MCP SDK
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+
+const transport = new SSEClientTransport(new URL('http://localhost:9423/sse'));
+const client = new Client({ name: 'web-app', version: '1.0' });
+await client.connect(transport);
+
+const result = await client.request(
+  { method: 'tools/call', params: { name: 'search_jobs', arguments: { search_term: 'engineer', site_names: 'indeed' } } },
+  resultSchema
+);
+```
 
 ### Available Tools
 
@@ -177,16 +158,27 @@ Searches for jobs across various job listing websites.
 
 | Parameter | Type | Description | Default |
 |-----------|------|-------------|---------|
-| site_names | string | Comma-separated list of job sites to search (indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri) | "indeed" |
+| site_names | string | Comma-separated list of sites (indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri) | "indeed" |
 | search_term | string | Search term for jobs | "software engineer" |
-| location | string | Location for job search | "San Francisco, CA" |
+| location | string | Location for job search | "remote" |
 | google_search_term | string | Google specific search term | null |
 | results_wanted | integer | Number of results wanted | 20 |
-| hours_old | integer | How many hours old the jobs can be | 72 |
+| hours_old | integer | How many hours old jobs can be | 72 |
 | country_indeed | string | Country for Indeed search | "USA" |
-| linkedin_fetch_description | boolean | Whether to fetch LinkedIn job descriptions (slower) | false |
+| linkedin_fetch_description | boolean | Fetch LinkedIn job descriptions (slower) | true |
 | format | string | Output format (json or csv) | "json" |
-| output | string | Output filename without extension | "jobs" |
+| distance | integer | Search radius in miles | 50 |
+| job_type | string | fulltime, parttime, internship, contract | null |
+| is_remote | boolean | Remote jobs only | false |
+| easy_apply | boolean | Jobs hosted on the board site | false |
+| offset | integer | Search result offset | 0 |
+| verbose | integer | 0=errors, 1=warnings, 2=all logs | 2 |
+| linkedin_company_ids | string | Comma-separated LinkedIn company IDs | null |
+| enforce_annual_salary | boolean | Convert wages to annual salary | false |
+| description_format | string | markdown or html | "markdown" |
+| proxies | string | Comma-separated proxy list | null |
+| ca_cert | string | CA cert path for proxies | null |
+| timeout | integer | Job search timeout in ms | 120000 |
 
 **Example usage with Claude:**
 
@@ -194,46 +186,38 @@ Searches for jobs across various job listing websites.
 I need to find senior software engineer jobs in Boston posted in the last 24 hours on both LinkedIn and Indeed.
 ```
 
-## Docker Support
-
-A Dockerfile is provided to containerize the MCP server:
+## Docker Compose
 
 ```bash
-# Build the Docker image
-docker build -t jobspy-mcp-server .
-
-# Run the container
-docker run -p 9423:9423 jobspy-mcp-server
+docker compose up -d          # start both services
+docker compose logs -f        # tail logs
+docker compose down           # stop
+docker compose build          # rebuild after changes
 ```
 
 ## Development
 
-### Running in development mode
-
 ```bash
-npm run dev
+npm run dev     # nodemon auto-restart
+npm run lint    # ESLint
 ```
 
-### Running tests
+### Test (curl)
+
+The `POST /api` endpoint returns results directly (bypasses MCP):
 
 ```bash
-npm test
-```
-
-```bash
-curl -X POST "http://localhost:9423/api" \
+curl -X POST http://localhost:9423/api \
   -H "Content-Type: application/json" \
   -d '{
-    "method": "search_jobs",
-    "params": {
-      "search_term": "software engineer",
-      "location": "San Francisco, CA",
-      "site_names": "indeed,linkedin",
-      "results_wanted": 10,
-      "format": "json"
-    }
+    "search_term": "software engineer",
+    "location": "San Francisco, CA",
+    "site_names": "indeed,linkedin",
+    "results_wanted": 5
   }'
-```  
+```
+
+> **Note**: `npm test` is a placeholder. The test file at `tests/jobSchema.test.js` uses CommonJS `require`/`describe` with no test framework configured and depends on an external `../../jobSpy/jobs.json` file.  
 
 ## License
 

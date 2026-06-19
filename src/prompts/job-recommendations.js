@@ -3,7 +3,7 @@ import { z } from 'zod';
 /**
  * Job Recommendations Schema - Parameters for job recommendations
  */
-export const jobRecommendationsSchema = z.object({
+export const jobRecommendationsSchema = {
   skills: z.string()
     .describe('A list of skills the job seeker possesses'),
   experienceLevel: z.string()
@@ -14,7 +14,7 @@ export const jobRecommendationsSchema = z.object({
     .describe('Areas of interest for the job seeker that can help guide job recommendations'),
   jobType: z.string()
     .describe('The type of job the seeker is looking for (e.g., full-time, part-time, contract, internship)'),
-});
+};
 
 
 /**

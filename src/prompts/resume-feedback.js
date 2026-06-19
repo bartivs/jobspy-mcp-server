@@ -6,7 +6,7 @@ import { z } from 'zod';
 export const resumeFeedbackPrompt = server => server.prompt(
   'resume_feedback',
   'Get professional feedback on your resume for specific roles and industries',
-  z.object({
+  {
     resumeText: z.string()
       .describe('The full text of the resume to analyze'),
     targetRole: z.string()
@@ -15,7 +15,7 @@ export const resumeFeedbackPrompt = server => server.prompt(
       .describe('The industry the job seeker is targeting'),
     experienceLevel: z.string()
       .describe('The experience level of the job seeker (e.g., entry-level, mid-level, senior)'),
-  }),
+  },
   (inputs) => {
     return {
       messages: [
