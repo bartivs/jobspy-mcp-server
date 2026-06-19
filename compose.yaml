@@ -11,7 +11,7 @@ services:
       - jobspy-network
 
   jobspy-mcp-server:
-    image: node:18-alpine
+    image: node:20-alpine
     container_name: jobspy-mcp
     restart: unless-stopped
     ports:
@@ -25,6 +25,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     command: >
       sh -c "
+        apk add --no-cache docker-cli &&
         npm install --omit=dev &&
         node src/index.js
       "
