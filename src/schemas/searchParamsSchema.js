@@ -6,12 +6,12 @@ export const searchParams = {
       z
         .string()
         .describe(
-          'Comma-separated list of job sites to search. Options: indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri'
+          'Comma-separated list of job sites to search. Options: indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri',
         ),
       z
         .array(z.string())
         .describe(
-          'Array of job sites to search. Options: indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri'
+          'Array of job sites to search. Options: indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri',
         ),
     ])
     .transform((val) => {
@@ -42,7 +42,7 @@ export const searchParams = {
       {
         message:
           'Invalid site names. Allowed values: indeed, linkedin, zip_recruiter, glassdoor, google, bayt, naukri',
-      }
+      },
     )
     .default('indeed'),
   searchTerm: z
@@ -92,7 +92,7 @@ export const searchParams = {
     .min(0)
     .max(2)
     .describe(
-      'Controls verbosity (0=errors only, 1=errors+warnings, 2=all logs)'
+      'Controls verbosity (0=errors only, 1=errors+warnings, 2=all logs)',
     )
     .default(2),
   countryIndeed: z
@@ -102,7 +102,7 @@ export const searchParams = {
   isRemote: z
     .any()
     .describe(
-      'Whether to search for remote jobs only. Accepts any truthy value.'
+      'Whether to search for remote jobs only. Accepts any truthy value.',
     )
     .transform((val) => {
       // Convert any truthy value to boolean
@@ -117,7 +117,7 @@ export const searchParams = {
   linkedinFetchDescription: z
     .any()
     .describe(
-      'Whether to fetch LinkedIn job descriptions (slower). Accepts any truthy value.'
+      'Whether to fetch LinkedIn job descriptions (slower). Accepts any truthy value.',
     )
     .transform((val) => {
       // Convert any truthy value to boolean

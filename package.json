@@ -11,9 +11,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint": "eslint src/ tests/search-jobs.node.test.js",
+    "lint:fix": "eslint src/ tests/search-jobs.node.test.js --fix",
+    "test": "node --test tests/search-jobs.node.test.js"
   },
   "keywords": [
     "mcp",

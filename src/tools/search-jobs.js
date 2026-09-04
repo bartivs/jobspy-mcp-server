@@ -1,6 +1,6 @@
 import logger from '../logger.js';
 import { searchParams } from '../schemas/searchParamsSchema.js';
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
 import changeCase from 'change-case-object';
 
@@ -56,7 +56,7 @@ export const searchJobsTool = (server, sseManager) =>
                 progress,
                 message: `Searching for jobs (${progress}%)...`,
               },
-              extra.sessionId
+              extra.sessionId,
             );
           }, 2000);
         }
@@ -77,7 +77,7 @@ export const searchJobsTool = (server, sseManager) =>
                 progress: 100,
                 message: 'Job search completed',
               },
-              extra.sessionId
+              extra.sessionId,
             );
           }
         }
@@ -98,13 +98,19 @@ export const searchJobsTool = (server, sseManager) =>
         logger.error('Error in search_jobs handler', { error: error.message });
         return {
           isError: true,
+          content: [
+            {
+              type: 'text',
+              text: error.message,
+            },
+          ],
           error: {
             message: error.message,
             code: 'INTERNAL_SERVER_ERROR',
           },
         };
       }
-    }
+    },
   );
 
 /**
@@ -114,7 +120,7 @@ export const searchJobsTool = (server, sseManager) =>
  * @returns {string|null} - ISO 8601 formatted date string or null if invalid
  */
 function convertToISODate(dateStr) {
-  if (!dateStr) return null;
+  if (!dateStr) {return null;}
 
   try {
     // If dateStr is a timestamp (number or numeric string)
@@ -171,15 +177,42 @@ export function searchJobsHandler(params) {
 
     logger.info('Validated parameters', { validatedParams });
 
-    const args = buildCommandArgs(validatedParams);
     const dockerCmd = process.env.DOCKER_CMD || 'docker';
-    const cmd = `${dockerCmd} run --rm jobspy ${args.join(' ')}`;
-    logger.info(`Spawning process with args: ${cmd}`);
+    const args = ['run', '--rm', 'jobspy', ...buildCommandArgs(validatedParams)];
+    logger.info('Spawning process with args', { dockerCmd, args });
 
     const timeout = params.timeout || 60000; // Default timeout of 60 seconds
-    result = execSync(cmd, { timeout }).toString();
+    result = spawnSync(dockerCmd, args, {
+      timeout,
+      encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
+    });
 
-    const parsedData = JSON.parse(result);
+    if (result.error) {
+      throw new Error(formatSpawnFailure(dockerCmd, args, result));
+    }
+
+    if (result.status !== 0) {
+      throw new Error(formatProcessFailure(dockerCmd, args, result));
+    }
+
+    const stdout = (result.stdout || '').trim();
+    if (!stdout) {
+      throw new Error(
+        `JobSpy returned no JSON output. stderr: ${truncateText(result.stderr)}`,
+      );
+    }
+
+    let parsedData;
+    try {
+      parsedData = JSON.parse(stdout);
+    } catch {
+      throw new Error(
+        `JobSpy returned invalid JSON. stdout: ${truncateText(stdout)} stderr: ${truncateText(
+          result.stderr,
+        )}`,
+      );
+    }
 
     // Convert to camelCase and normalize date fields to ISO 8601
     const data = parsedData.map((job) => {
@@ -202,7 +235,14 @@ export function searchJobsHandler(params) {
   } catch (error) {
     logger.error('Error in searchJobsHandler', {
       error: error.message,
-      result,
+      result: result
+        ? {
+          status: result.status,
+          signal: result.signal,
+          stdout: truncateText(result.stdout),
+          stderr: truncateText(result.stderr),
+        }
+        : undefined,
     });
     throw error;
   }
@@ -213,18 +253,18 @@ export function searchJobsHandler(params) {
  * @param {JobSearchParams} params - Search parameters
  * @returns {string[]} Command line arguments
  */
-function buildCommandArgs(params) {
+export function buildCommandArgs(params) {
   const args = [];
 
   // Add each parameter as a command line argument
   if (params.siteNames) {
-    args.push('--site_name', `"${params.siteNames}"`);
+    args.push('--site_name', params.siteNames);
   }
   if (params.searchTerm) {
-    args.push('--search_term', `"${params.searchTerm}"`);
+    args.push('--search_term', params.searchTerm);
   }
   if (params.location) {
-    args.push('--location', `"${params.location}"`);
+    args.push('--location', params.location);
   }
   if (params.distance) {
     args.push('--distance', `${params.distance}`);
@@ -233,7 +273,7 @@ function buildCommandArgs(params) {
     args.push('--job_type', `${params.jobType}`);
   }
   if (params.googleSearchTerm) {
-    args.push('--google_search_term', `"${params.googleSearchTerm}"`);
+    args.push('--google_search_term', params.googleSearchTerm);
   }
   if (params.resultsWanted) {
     args.push('--results_wanted', `${params.resultsWanted}`);
@@ -254,7 +294,7 @@ function buildCommandArgs(params) {
     args.push('--verbose', `${params.verbose}`);
   }
   if (params.countryIndeed) {
-    args.push('--country_indeed', `"${params.countryIndeed}"`);
+    args.push('--country_indeed', params.countryIndeed);
   }
   if (params.isRemote) {
     args.push('--is_remote');
@@ -263,17 +303,72 @@ function buildCommandArgs(params) {
     args.push('--linkedin_fetch_description');
   }
   if (params.linkedinCompanyIds) {
-    args.push('--linkedin_company_ids', `"${params.linkedinCompanyIds}"`);
+    args.push('--linkedin_company_ids', `${params.linkedinCompanyIds}`);
   }
   if (params.enforceAnnualSalary) {
     args.push('--enforce_annual_salary');
   }
   if (params.proxies) {
-    args.push('--proxies', `"${params.proxies}"`);
+    args.push('--proxies', params.proxies);
   }
   if (params.caCert) {
-    args.push('--ca_cert', `"${params.caCert}"`);
+    args.push('--ca_cert', params.caCert);
   }
   args.push('--format', params.format || 'json');
   return args;
+}
+
+function truncateText(text, max = 1200) {
+  if (!text) {
+    return '';
+  }
+  const clean = String(text).trim();
+  if (clean.length <= max) {
+    return clean;
+  }
+  return `${clean.slice(0, max)}…`;
+}
+
+export function formatProcessFailure(command, args, result) {
+  const parts = [
+    `JobSpy process failed (exit ${result.status ?? 'unknown'})`,
+    `command: ${command} ${args.join(' ')}`,
+  ];
+
+  if (result.signal) {
+    parts.push(`signal: ${result.signal}`);
+  }
+
+  if (result.stderr?.trim()) {
+    parts.push(`stderr: ${truncateText(result.stderr)}`);
+  }
+
+  if (result.stdout?.trim()) {
+    parts.push(`stdout: ${truncateText(result.stdout)}`);
+  }
+
+  if (result.stderr?.includes('ExceptionGroup')) {
+    parts.push(
+      'hint: JobSpy raised an ExceptionGroup; inspect the stderr above for the inner site-specific failure.',
+    );
+  }
+
+  return parts.join('\n');
+}
+
+export function formatSpawnFailure(command, args, result) {
+  const parts = [
+    `Failed to start JobSpy process: ${result.error?.message || 'unknown error'}`,
+    `command: ${command} ${args.join(' ')}`,
+  ];
+
+  if (result.error?.code) {
+    parts.push(`code: ${result.error.code}`);
+  }
+
+  if (result.stderr?.trim()) {
+    parts.push(`stderr: ${truncateText(result.stderr)}`);
+  }
+
+  return parts.join('\n');
 }

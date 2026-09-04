@@ -25,7 +25,7 @@ const logger = winston.createLogger({
     }),
     winston.format.errors({ stack: true }),
     winston.format.splat(),
-    winston.format.json()
+    winston.format.json(),
   ),
   defaultMeta: { service: 'jobspy-mcp-server' },
   transports: [
@@ -34,8 +34,8 @@ const logger = winston.createLogger({
       format: winston.format.combine(
         winston.format.colorize({ all: true }),
         winston.format.printf(
-          (info) => `${info.timestamp} ${info.level}: ${info.message}`
-        )
+          (info) => `${info.timestamp} ${info.level}: ${info.message}`,
+        ),
       ),
     }),
   ],
