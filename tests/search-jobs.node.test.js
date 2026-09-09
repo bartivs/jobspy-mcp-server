@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { z } from 'zod';
+
+import { searchParams } from '../src/schemas/searchParamsSchema.js';
 import {
   buildCommandArgs,
   searchJobsHandler,
@@ -33,6 +36,23 @@ function makeFakeDocker(body) {
   fs.writeFileSync(script, body, { mode: 0o755 });
   return { dir, script };
 }
+
+test('siteNames normalizes common MCP client spellings', () => {
+  const schema = z.object(searchParams);
+
+  assert.equal(
+    schema.parse({ siteNames: ['LinkedIn', 'ZipRecruiter'] }).siteNames,
+    'linkedin,zip_recruiter',
+  );
+  assert.equal(
+    schema.parse({ siteNames: 'indeed, zip-recruiter, LinkedIn' }).siteNames,
+    'indeed,zip_recruiter,linkedin',
+  );
+  assert.throws(
+    () => schema.parse({ siteNames: 'monster' }),
+    /Invalid site names/,
+  );
+});
 
 test('buildCommandArgs keeps multi-word values as single argv entries', () => {
   const args = buildCommandArgs({

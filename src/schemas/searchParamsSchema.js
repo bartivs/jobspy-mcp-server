@@ -1,44 +1,43 @@
 import { z } from 'zod';
 
+const validSites = new Set([
+  'indeed',
+  'linkedin',
+  'zip_recruiter',
+  'glassdoor',
+  'google',
+  'bayt',
+  'naukri',
+]);
+
+function normalizeSiteNames(value) {
+  const sites = (Array.isArray(value) ? value.join(',') : value)
+    .split(',')
+    .map((site) => site.trim().toLowerCase().replace(/[\s-]+/g, '_'))
+    .map((site) => (site === 'ziprecruiter' ? 'zip_recruiter' : site));
+
+  return [...new Set(sites)].join(',');
+}
+
 export const searchParams = {
   siteNames: z
     .union([
       z
         .string()
         .describe(
-          'Comma-separated list of job sites to search. Options: indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri',
+          'Comma-separated job sites: indeed, linkedin, zip_recruiter (or ziprecruiter), glassdoor, google, bayt, naukri',
         ),
       z
         .array(z.string())
         .describe(
-          'Array of job sites to search. Options: indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri',
+          'Array of job sites: indeed, linkedin, zip_recruiter (or ziprecruiter), glassdoor, google, bayt, naukri',
         ),
     ])
-    .transform((val) => {
-      // If it's already a string, return it as is
-      if (typeof val === 'string') {
-        return val;
-      }
-      // If it's an array, join it with commas
-      if (Array.isArray(val)) {
-        return val.join(',');
-      }
-      return val;
-    })
+    .transform(normalizeSiteNames)
     .refine(
-      (val) => {
-        const sites = val.split(',').map((site) => site.trim());
-        const validSites = [
-          'indeed',
-          'linkedin',
-          'zip_recruiter',
-          'glassdoor',
-          'google',
-          'bayt',
-          'naukri',
-        ];
-        return sites.every((site) => validSites.includes(site));
-      },
+      (value) =>
+        value.length > 0 &&
+        value.split(',').every((site) => validSites.has(site)),
       {
         message:
           'Invalid site names. Allowed values: indeed, linkedin, zip_recruiter, glassdoor, google, bayt, naukri',
