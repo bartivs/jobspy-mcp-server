@@ -1,6 +1,6 @@
 import logger from '../logger.js';
 import { searchParams } from '../schemas/searchParamsSchema.js';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import changeCase from 'change-case-object';
 
@@ -62,7 +62,7 @@ export const searchJobsTool = (server, sseManager) =>
         }
 
         // Execute job search
-        const result = searchJobsHandler(params);
+        const result = await searchJobsHandler(params);
 
         // Clean up progress interval
         if (progressInterval) {
@@ -151,7 +151,7 @@ function convertToISODate(dateStr) {
  * @param {JobSearchParams} params - Search parameters
  * @returns {Promise<object>} Search results
  */
-export function searchJobsHandler(params) {
+export async function searchJobsHandler(params) {
   let result;
   try {
     logger.info('Starting job search with parameters', { params });
@@ -178,15 +178,18 @@ export function searchJobsHandler(params) {
     logger.info('Validated parameters', { validatedParams });
 
     const dockerCmd = process.env.DOCKER_CMD || 'docker';
-    const args = ['run', '--rm', 'jobspy', ...buildCommandArgs(validatedParams)];
+    const container = process.env.JOBSPY_SCRAPER_CONTAINER || 'jobspy-scraper';
+    const args = [
+      'exec',
+      container,
+      'python',
+      'main.py',
+      ...buildCommandArgs(validatedParams),
+    ];
     logger.info('Spawning process with args', { dockerCmd, args });
 
-    const timeout = params.timeout || 60000; // Default timeout of 60 seconds
-    result = spawnSync(dockerCmd, args, {
-      timeout,
-      encoding: 'utf8',
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    const timeout = params.timeout || 120000; // Default timeout is 120 seconds
+    result = await runProcess(dockerCmd, args, timeout);
 
     if (result.error) {
       throw new Error(formatSpawnFailure(dockerCmd, args, result));
@@ -316,6 +319,54 @@ export function buildCommandArgs(params) {
   }
   args.push('--format', params.format || 'json');
   return args;
+}
+
+function runProcess(command, args, timeout) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    let forceKillTimer;
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (!timedOut) {
+        clearTimeout(forceKillTimer);
+      }
+      resolve({ ...result, stdout, stderr });
+    };
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', (error) => {
+      finish({ error, status: null, signal: null });
+    });
+    child.on('close', (status, signal) => {
+      finish({ status, signal });
+    });
+
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      const error = new Error(`JobSpy process timed out after ${timeout}ms`);
+      error.code = 'ETIMEDOUT';
+      child.kill('SIGTERM');
+      forceKillTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      finish({ error, status: null, signal: 'SIGTERM' });
+    }, timeout);
+  });
 }
 
 function truncateText(text, max = 1200) {

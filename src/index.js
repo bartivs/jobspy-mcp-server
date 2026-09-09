@@ -11,165 +11,125 @@ import {
 } from './prompts/index.js';
 import { searchJobsTool, searchJobsHandler } from './tools/index.js';
 
-// Environment configuration
 const PORT = process.env.JOBSPY_PORT || 9423;
 const HOST = process.env.JOBSPY_HOST || '0.0.0.0';
 const ENABLE_SSE = !!(process.env.ENABLE_SSE | 0);
 
-// Create the MCP server
-const server = new McpServer({
-  name: 'JobSpy MCP Server',
-  version: '1.0.0',
-  description:
-    'A Model Context Protocol server that enables searching for jobs across various platforms',
-});
-
-const sseManager = new SseManager(server);
-
-searchJobsPrompt(server);
-jobRecommendationsPrompt(server);
-resumeFeedbackPrompt(server);
-searchJobsTool(server, sseManager);
-
-// Initialize transports
+const sseManager = new SseManager();
+let stdioServer = null;
 let stdioTransport = null;
 let httpServer = null;
 
-// Start the server with configured transports
+/** Create a fully registered MCP server for one transport connection. */
+function createMcpServer() {
+  const server = new McpServer({
+    name: 'JobSpy MCP Server',
+    version: '1.0.0',
+    description:
+      'A Model Context Protocol server that enables searching for jobs across various platforms',
+  });
+
+  searchJobsPrompt(server);
+  jobRecommendationsPrompt(server);
+  resumeFeedbackPrompt(server);
+  searchJobsTool(server, sseManager);
+  return server;
+}
+
 async function runServer() {
   logger.info('Starting JobSpy MCP server...');
 
-  try {
-    // Initialize and connect transports
-    const connectedTransports = [];
+  if (ENABLE_SSE) {
+    const app = express();
+    app.use(cors());
+    app.use(express.json());
+    app.use(express.urlencoded({ extended: true }));
 
-    // Set up SSE transport if enabled
-    if (ENABLE_SSE) {
+    app.get('/health', (req, res) => {
+      res.status(200).json({ status: 'ok' });
+    });
+
+    app.get('/sse', async (req, res) => {
+      const server = createMcpServer();
+      const transport = sseManager.createTransport('/messages', res, server);
+
+      res.on('close', () => {
+        sseManager.removeTransport(transport.sessionId);
+        logger.info(`Client disconnected: ${transport.sessionId}`);
+      });
+
       try {
-        // Create Express app
-        const app = express();
-
-        // Configure CORS
-        app.use(cors());
-
-        // Configure Express middleware
-        app.use(express.json());
-        app.use(express.urlencoded({ extended: true }));
-
-        // Health check endpoint
-        app.get('/health', (req, res) => {
-          res.status(200).json({ status: 'ok' });
-        });
-
-        // SSE endpoint for client connections
-        app.get('/sse', async (req, res) => {
-          const transport = sseManager.createTransport('/messages', res);
-
-          res.on('close', () => {
-            sseManager.removeTransport(transport.sessionId);
-            logger.info(`Client disconnected: ${transport.sessionId}`);
-          });
-
-          await server.connect(transport);
-          logger.info(`New SSE client connected: ${transport.sessionId}`);
-        });
-
-        // Message handling endpoint
-        app.post('/messages', async (req, res) => {
-          const transport = sseManager.getTransport(req);
-
-          if (transport) {
-            await transport.handlePostMessage(req, res, req.body);
-          } else {
-            res.status(400).send('No transport found for sessionId');
-          }
-        });
-
-        app.post('/api', async (req, res) => {
-          try {
-            const data = searchJobsHandler(req.body);
-            res.json(data);
-          } catch (error) {
-            logger.error('Error in /api searchJobsHandler', {
-              error: error.message,
-            });
-            res.status(500).json({
-              message: error.message,
-            });
-          }
-        });
-
-        // Start the Express server
-        httpServer = app.listen(PORT, HOST, () => {
-          logger.info(`SSE server listening at http://${HOST}:${PORT}`);
-        });
-
-        connectedTransports.push('SSE');
-
-        logger.info(`SSE transport listening at http://${HOST}:${PORT}/sse`);
-        logger.info(
-          `Send endpoint available at http://${HOST}:${PORT}/messages`,
-        );
+        await server.connect(transport);
+        logger.info(`New SSE client connected: ${transport.sessionId}`);
       } catch (error) {
-        logger.error('Failed to connect SSE transport', {
+        sseManager.removeTransport(transport.sessionId);
+        logger.error('Failed to connect SSE client', {
           error: error.message,
           stack: error.stack,
         });
+        if (!res.headersSent) {
+          res.status(500).end();
+        }
       }
-    } else {
-      // Set up stdio transport if no SSE
-      try {
-        stdioTransport = new StdioServerTransport();
-        await server.connect(stdioTransport);
-        connectedTransports.push('stdio');
+    });
 
-        logger.info('Stdio transport connected');
+    app.post('/messages', async (req, res) => {
+      const transport = sseManager.getTransport(req);
+      if (transport) {
+        await transport.handlePostMessage(req, res, req.body);
+      } else {
+        res.status(400).send('No transport found for sessionId');
+      }
+    });
+
+    app.post('/api', async (req, res) => {
+      try {
+        const data = await searchJobsHandler(req.body);
+        res.json(data);
       } catch (error) {
-        logger.error('Failed to connect stdio transport', {
+        logger.error('Error in /api searchJobsHandler', {
           error: error.message,
         });
+        res.status(500).json({ message: error.message });
       }
-    }
-
-    // Ensure at least one transport is connected
-    if (connectedTransports.length === 0) {
-      throw new Error('No transports connected. Check configuration.');
-    }
-
-    logger.info(
-      `Server successfully connected with transports: ${connectedTransports.join(
-        ', ',
-      )}`,
-    );
-  } catch (error) {
-    logger.error('Server connection error', {
-      error: error.message,
-      stack: error.stack,
     });
-    process.exit(1);
+
+    httpServer = app.listen(PORT, HOST, () => {
+      logger.info(`SSE server listening at http://${HOST}:${PORT}`);
+    });
+
+    logger.info(`SSE transport listening at http://${HOST}:${PORT}/sse`);
+    logger.info(`Send endpoint available at http://${HOST}:${PORT}/messages`);
+    return;
   }
+
+  stdioServer = createMcpServer();
+  stdioTransport = new StdioServerTransport();
+  await stdioServer.connect(stdioTransport);
+  logger.info('Stdio transport connected');
 }
 
-// Handle graceful shutdown
 async function shutdown() {
   logger.info('Shutting down JobSpy MCP server...');
 
   try {
-    // Disconnect all transports gracefully
-    await server.disconnect();
+    const disconnects = sseManager
+      .getServers()
+      .map((server) => server.close());
+    if (stdioServer) {
+      disconnects.push(stdioServer.close());
+    }
+    await Promise.allSettled(disconnects);
 
-    // Close HTTP server if it exists
     if (httpServer) {
-      httpServer.close(() => {
-        logger.info('HTTP server closed');
-      });
+      await new Promise((resolve) => httpServer.close(resolve));
+      logger.info('HTTP server closed');
     }
 
     logger.info('Server shutdown complete');
   } catch (error) {
     logger.error('Error during shutdown', { error: error.message });
   } finally {
-    // Give logger time to flush
     setTimeout(() => process.exit(0), 100);
   }
 }
@@ -177,7 +137,6 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Run the server
 runServer().catch((error) => {
   logger.error('Unhandled error in server', { error: error.message });
   process.exit(1);

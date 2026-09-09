@@ -9,7 +9,7 @@ import {
   searchJobsHandler,
 } from '../src/tools/search-jobs.js';
 
-function withEnv(name, value, fn) {
+async function withEnv(name, value, fn) {
   const oldValue = process.env[name];
   if (value === undefined) {
     delete process.env[name];
@@ -17,7 +17,7 @@ function withEnv(name, value, fn) {
     process.env[name] = value;
   }
   try {
-    return fn();
+    return await fn();
   } finally {
     if (oldValue === undefined) {
       delete process.env[name];
@@ -58,13 +58,13 @@ test('buildCommandArgs keeps multi-word values as single argv entries', () => {
   assert.equal(args.some((arg) => arg.includes('"')), false);
 });
 
-test('searchJobsHandler returns parsed jobs from child stdout', () => {
+test('searchJobsHandler returns parsed jobs from child stdout', async () => {
   const { dir, script } = makeFakeDocker(`#!/bin/sh
 printf '%s\n' '[{"site":"indeed","job_url":"https://example.com/job","date_posted":1725465600000}]'
 `);
 
   try {
-    const result = withEnv('DOCKER_CMD', script, () =>
+    const result = await withEnv('DOCKER_CMD', script, () =>
       searchJobsHandler({
         siteNames: 'indeed',
         searchTerm: 'python ai',
@@ -83,7 +83,7 @@ printf '%s\n' '[{"site":"indeed","job_url":"https://example.com/job","date_poste
   }
 });
 
-test('searchJobsHandler surfaces stderr and exit code on child failure', () => {
+test('searchJobsHandler surfaces stderr and exit code on child failure', async () => {
   const { dir, script } = makeFakeDocker(`#!/bin/sh
 printf '%s\n' 'ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)' >&2
 printf '%s\n' 'inner: linkedin returned 999' >&2
@@ -93,7 +93,7 @@ exit 1
   try {
     let error;
     try {
-      withEnv('DOCKER_CMD', script, () =>
+      await withEnv('DOCKER_CMD', script, () =>
         searchJobsHandler({
           siteNames: 'linkedin',
           searchTerm: 'python ai',

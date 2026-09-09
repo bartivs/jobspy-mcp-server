@@ -2,50 +2,41 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import logger from './logger.js';
 
 /**
- * Manages SSE server transports for multiple client connections
+ * Manages SSE server transports for multiple client connections.
+ * Each connection owns a separate MCP server instance; MCP Protocol objects
+ * cannot be connected to more than one transport at a time.
  */
 class SseManager {
-  /**
-   * @type {Object.<string, SSEServerTransport>}
-   * Storage for active transports mapped by their sessionId
-   */
+  /** @type {Object.<string, SSEServerTransport>} */
   transports = {};
 
-  /**
-   * @type McpServer
-   */
-  mcpServer;
+  /** @type {Object.<string, import('@modelcontextprotocol/sdk/server/mcp.js').McpServer>} */
+  servers = {};
 
-  /**
-   * Storage for progress tokens by sessionId
-   */
+  /** @type {Object.<string, string|number|undefined>} */
   progressTokens = {};
 
-  /**
-   * Storage for tool calls by connectionId and toolCallId
-   */
+  /** @type {Object.<string, Object>} */
   toolCalls = {};
 
-  constructor(server) {
-    this.mcpServer = server;
-  }
-
   /**
-   * Adds a new SSE transport for a client
+   * Adds a new SSE transport and its dedicated MCP server.
    * @param {string} sendPath - Path for client to send messages to
    * @param {Response} res - Express response object
+   * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
    * @returns {SSEServerTransport} The created transport
    */
-  createTransport(sendPath, res) {
+  createTransport(sendPath, res, server) {
     const transport = new SSEServerTransport(sendPath, res);
     this.transports[transport.sessionId] = transport;
+    this.servers[transport.sessionId] = server;
     return transport;
   }
 
   /**
-   * Gets a transport by sessionId
-   * @param {string} sessionId - Session ID
-   * @returns {SSEServerTransport|undefined} The transport or undefined if not found
+   * Gets a transport by sessionId.
+   * @param {Request} req
+   * @returns {SSEServerTransport|undefined}
    */
   getTransport(req) {
     const sessionId = req.query.sessionId;
@@ -53,28 +44,27 @@ class SseManager {
     return this.transports[sessionId];
   }
 
-  /**
-   * Removes a transport when client disconnects
-   * @param {string} sessionId - Session ID to remove
-   */
+  /** Removes a transport and its per-connection state. */
   removeTransport(sessionId) {
     if (this.transports[sessionId]) {
       delete this.transports[sessionId];
+      delete this.servers[sessionId];
       delete this.progressTokens[sessionId];
+      delete this.toolCalls[sessionId];
       logger.info(`Removed transport for session: ${sessionId}`);
       return true;
     }
     return false;
   }
 
-  /**
-   * Sends an update to all connected clients
-   * @param {object} message - Message to broadcast
-   */
+  /** Sends a progress notification through the connection's own MCP server. */
   async notificationProgress(message, sessionId) {
-    const clients = Object.values(this.transports);
-    if (clients.length === 0) {return;}
-    await this.mcpServer.server.notification({
+    const server = this.servers[sessionId];
+    if (!server) {
+      return;
+    }
+
+    await server.server.notification({
       method: 'notifications/progress',
       params: {
         ...message,
@@ -83,20 +73,15 @@ class SseManager {
     });
   }
 
-  /**
-   * Checks if there are any active connections
-   * @returns {boolean} True if there are active connections
-   */
   hasConnection(sessionId) {
-    return this.transports[sessionId];
+    return Boolean(this.transports[sessionId]);
   }
 
-  /**
-   * Process a stream event from a model
-   * @param {Object} event - The event to process
-   * @param {string} connectionId - The connection ID
-   * @param {string} toolCallId - The tool call ID
-   */
+  getServers() {
+    return Object.values(this.servers);
+  }
+
+  /** Existing stream-event bookkeeping retained for API compatibility. */
   handleStreamEvent(event, connectionId, toolCallId) {
     if (!event || !event.choices || !event.choices[0]) {
       return;
@@ -105,30 +90,24 @@ class SseManager {
     const delta = event.choices[0].delta;
     if (delta && delta.tool_calls && delta.tool_calls[0]) {
       const toolCall = delta.tool_calls[0];
-      
-      // Store or update the tool call in our cache
+
       if (!this.toolCalls[connectionId]) {
         this.toolCalls[connectionId] = {};
       }
-      
+
       if (!this.toolCalls[connectionId][toolCallId]) {
         this.toolCalls[connectionId][toolCallId] = {
-          function: {
-            name: '',
-            arguments: '',
-          },
+          function: { name: '', arguments: '' },
           index: toolCall.index,
           id: toolCallId,
         };
       }
 
       const currentToolCall = this.toolCalls[connectionId][toolCallId];
-
       if (toolCall.function) {
         if (toolCall.function.name) {
           currentToolCall.function.name = toolCall.function.name;
         }
-        
         if (toolCall.function.arguments) {
           currentToolCall.function.arguments += toolCall.function.arguments;
         }
