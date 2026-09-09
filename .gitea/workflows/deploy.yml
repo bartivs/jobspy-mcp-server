@@ -1,0 +1,76 @@
+name: deploy-jobspy
+
+# Gitea is the primary forge. A push to main syncs the committed source to
+# openweb-ui and rebuilds/restarts the local Compose stack.
+#
+# Required Gitea Actions secret:
+#   DEPLOY_SSH_KEY — ed25519 key authorized for root@192.168.1.109
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trust homelab CA for git
+        shell: bash
+        run: |
+          git config --global http.sslCAInfo /etc/ssl/certs/homelab-ca.crt
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deploy tools
+        shell: bash
+        run: |
+          set -eu
+          apt-get update -qq
+          apt-get install -y -qq openssh-client rsync >/dev/null
+
+      - name: Install deploy key
+        shell: bash
+        run: |
+          set -eu
+          test -n "${{ secrets.DEPLOY_SSH_KEY }}"
+          echo "::add-mask::${{ secrets.DEPLOY_SSH_KEY }}"
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/jobspy-deploy-key
+          chmod 600 /tmp/jobspy-deploy-key
+
+      - name: Sync source to openweb-ui
+        shell: bash
+        run: |
+          set -eu
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.gitea/' \
+            --exclude 'node_modules/' \
+            --exclude '.env' \
+            -e "ssh -i /tmp/jobspy-deploy-key -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10" \
+            ./ root@192.168.1.109:/root/mcps/jobspy-mcp-server/
+
+      - name: Rebuild and restart JobSpy
+        shell: bash
+        run: |
+          set -eu
+          ssh -i /tmp/jobspy-deploy-key \
+              -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+              root@192.168.1.109 '
+            set -eu
+            cd /root/mcps/jobspy-mcp-server
+            docker compose build
+            systemctl restart jobspy-mcp
+            systemctl is-active --quiet jobspy-mcp
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:9423/health >/dev/null; then
+                break
+              fi
+              sleep 2
+            done
+            curl -fsS http://127.0.0.1:9423/health
+            docker ps --filter name=jobspy --format "{{.Names}} {{.Status}}"
+          '
+          rm -f /tmp/jobspy-deploy-key
