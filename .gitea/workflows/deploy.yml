@@ -33,12 +33,14 @@ jobs:
 
       - name: Install deploy key
         shell: bash
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           set -eu
-          test -n "${{ secrets.DEPLOY_SSH_KEY }}"
-          echo "::add-mask::${{ secrets.DEPLOY_SSH_KEY }}"
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/jobspy-deploy-key
-          chmod 600 /tmp/jobspy-deploy-key
+          test -n "$DEPLOY_SSH_KEY"
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_KEY" > /tmp/jobspy-deploy-key
+          unset DEPLOY_SSH_KEY
 
       - name: Sync source to openweb-ui
         shell: bash
