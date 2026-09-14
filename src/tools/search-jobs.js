@@ -6,13 +6,13 @@ import changeCase from 'change-case-object';
 
 /**
  * @typedef {Object} JobSearchParams
- * @property {string} [siteNames] - Names of job sites to search (linkedin, zip_recruiter, indeed, glassdoor, google, bayt)
+ * @property {string} siteNames - Exactly one job site to search
  * @property {string} [searchTerm] - Term to search for
  * @property {string} [location] - Job location
  * @property {number} [distance] - Distance in miles, default 50
  * @property {string} [jobType] - Type of job: fulltime, parttime, internship, contract
  * @property {string} [googleSearchTerm] - Term for Google job search
- * @property {number} [resultsWanted] - Number of job results to retrieve for each site
+ * @property {number} [resultsWanted] - Page size for the selected site (1-10)
  * @property {boolean} [easyApply] - Filters for jobs that are hosted on the job board site
  * @property {string} [descriptionFormat] - Format type of the job descriptions: markdown, html
  * @property {number} [offset] - Starts the search from an offset
@@ -25,14 +25,23 @@ import changeCase from 'change-case-object';
  * @property {boolean} [enforceAnnualSalary] - Converts wages to annual salary
  * @property {string} [proxies] - Comma-separated list of proxies
  * @property {string} [caCert] - Path to CA Certificate file for proxies
- * @property {'json'|'csv'} [format] - Output format: JSON or CSV
+ * @property {'json'} [format] - MCP output format (always JSON)
  * @property {number} [timeout] - Timeout in milliseconds for the job search process
  */
+
+const SEARCH_JOBS_DESCRIPTION = [
+  'Search exactly one job source per call.',
+  'Start with offset 0 and resultsWanted 10.',
+  'To paginate, repeat the same source and filters using nextOffset from the previous response.',
+  'Never repeat an identical source/filter/offset request.',
+  'After a failure, simplify the filters or switch sources instead of retrying unchanged.',
+  'ZipRecruiter and Bayt do not support pagination.',
+].join(' ');
 
 export const searchJobsTool = (server, sseManager) =>
   server.tool(
     'search_jobs',
-    'Search for jobs across various job listing websites',
+    SEARCH_JOBS_DESCRIPTION,
     searchParams,
     async (params, extra) => {
       let progressInterval;
@@ -147,6 +156,47 @@ function convertToISODate(dateStr) {
 }
 
 /**
+ * Reject source combinations that JobSpy cannot apply reliably. These checks
+ * fail quickly with actionable guidance instead of spending the scraper timeout
+ * on a request whose filters would be ignored or whose offset is unsupported.
+ * @param {JobSearchParams} params
+ */
+export function validateSiteSpecificParams(params) {
+  const source = params.siteNames;
+
+  if (params.offset > 0 && ['zip_recruiter', 'bayt'].includes(source)) {
+    throw new Error(
+      `${source} does not support offset pagination. Keep offset at 0 or switch to a source that supports pagination.`,
+    );
+  }
+
+  if (source === 'indeed') {
+    const filterGroups = [
+      params.hoursOld !== null && params.hoursOld !== undefined,
+      params.easyApply === true,
+      Boolean(params.jobType || params.isRemote),
+    ].filter(Boolean).length;
+
+    if (filterGroups > 1) {
+      throw new Error(
+        'Indeed accepts only one filter group per call: hoursOld; easyApply; or jobType/isRemote. Remove the conflicting filters and make one new request.',
+      );
+    }
+  }
+
+  if (
+    source === 'linkedin' &&
+    params.hoursOld !== null &&
+    params.hoursOld !== undefined &&
+    params.easyApply === true
+  ) {
+    throw new Error(
+      'LinkedIn does not support hoursOld and easyApply together. Remove one filter and make one new request.',
+    );
+  }
+}
+
+/**
  * Handler for the search_jobs MCP tool
  * @param {JobSearchParams} params - Search parameters
  * @returns {Promise<object>} Search results
@@ -156,16 +206,11 @@ export async function searchJobsHandler(params) {
   try {
     logger.info('Starting job search with parameters', { params });
 
-    // Clean params by removing empty strings and 0 values
+    // Keep meaningful zero values such as offset=0 and verbose=0. Only absent
+    // optional values are removed before defaults and validation are applied.
     const cleanedParams = {};
     for (const [key, value] of Object.entries(params)) {
-      // Skip null, undefined, empty strings, and 0 values
-      if (
-        value === null ||
-        value === undefined ||
-        value === '' ||
-        value === 0
-      ) {
+      if (value === null || value === undefined || value === '') {
         continue;
       }
       cleanedParams[key] = value;
@@ -174,6 +219,7 @@ export async function searchJobsHandler(params) {
     logger.info('Cleaned parameters', { cleanedParams });
 
     const validatedParams = z.object(searchParams).parse(cleanedParams);
+    validateSiteSpecificParams(validatedParams);
 
     logger.info('Validated parameters', { validatedParams });
 
@@ -188,7 +234,7 @@ export async function searchJobsHandler(params) {
     ];
     logger.info('Spawning process with args', { dockerCmd, args });
 
-    const timeout = params.timeout || 120000; // Default timeout is 120 seconds
+    const timeout = validatedParams.timeout;
     result = await runProcess(dockerCmd, args, timeout);
 
     if (result.error) {
@@ -217,6 +263,10 @@ export async function searchJobsHandler(params) {
       );
     }
 
+    if (!Array.isArray(parsedData)) {
+      throw new Error('JobSpy returned JSON in an unexpected non-array format.');
+    }
+
     // Convert to camelCase and normalize date fields to ISO 8601
     const data = parsedData.map((job) => {
       const jobCamelCase = changeCase.camelCase(job);
@@ -229,11 +279,27 @@ export async function searchJobsHandler(params) {
       return jobCamelCase;
     });
 
+    const paginationSupported = !['zip_recruiter', 'bayt'].includes(
+      validatedParams.siteNames,
+    );
+    const hasMore =
+      paginationSupported && data.length === validatedParams.resultsWanted;
+    const nextOffset = hasMore
+      ? validatedParams.offset + validatedParams.resultsWanted
+      : null;
+
     logger.info(`Found jobs: ${data.length}`);
     return {
-      count: data.length || 0,
+      count: data.length,
       message: 'Job search completed successfully',
-      jobs: data || [],
+      source: validatedParams.siteNames,
+      offset: validatedParams.offset,
+      pageSize: validatedParams.resultsWanted,
+      returned: data.length,
+      paginationSupported,
+      hasMore,
+      nextOffset,
+      jobs: data,
     };
   } catch (error) {
     logger.error('Error in searchJobsHandler', {

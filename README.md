@@ -4,10 +4,11 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude to 
 
 ## Features
 
-- Search for jobs across multiple platforms (Indeed, LinkedIn, Glassdoor, etc.)
+- Search Indeed, LinkedIn, Glassdoor, Google, ZipRecruiter, Bayt, or Naukri
+- Search exactly one source per call so failures and offsets stay source-specific
+- Page supported sources with explicit `offset`, `nextOffset`, and `hasMore` metadata
 - Filter by search terms, location, time frames, and more
-- Get structured job data that AI models can easily process
-- Format results as JSON or CSV
+- Get structured JSON job data that AI models can easily process
 - Multiple transport options: stdio for Claude integration, SSE for web clients
 
 ## Prerequisites
@@ -51,7 +52,7 @@ Defaults are in `.env` (committed).
 docker compose up -d
 ```
 
-The server listens on `http://localhost:9423`. The `jobspy-scraper` container stays alive and the Node server calls it on-demand via `docker run --rm jobspy` through the mounted Docker socket.
+The server listens on `http://localhost:9423`. The `jobspy-scraper` container stays alive and the Node server calls `python main.py` inside it on demand through the mounted Docker socket.
 
 ### Direct (for Claude Desktop stdio)
 
@@ -109,7 +110,7 @@ LiteLLM connects via SSE and can call `search_jobs` as a tool through the OpenAI
 
 ### curl (direct API)
 
-The `POST /api` endpoint bypasses the MCP protocol and returns results directly:
+The `POST /api` endpoint bypasses the MCP protocol and returns results directly. It accepts snake_case or camelCase keys, but still requires exactly one source:
 
 ```bash
 curl -X POST http://localhost:9423/api \
@@ -117,8 +118,9 @@ curl -X POST http://localhost:9423/api \
   -d '{
     "search_term": "software engineer",
     "location": "San Francisco, CA",
-    "site_names": "indeed,linkedin",
-    "results_wanted": 5
+    "site_names": "indeed",
+    "results_wanted": 10,
+    "offset": 0
   }'
 ```
 
@@ -143,7 +145,7 @@ const client = new Client({ name: 'web-app', version: '1.0' });
 await client.connect(transport);
 
 const result = await client.request(
-  { method: 'tools/call', params: { name: 'search_jobs', arguments: { search_term: 'engineer', site_names: 'indeed' } } },
+  { method: 'tools/call', params: { name: 'search_jobs', arguments: { searchTerm: 'engineer', siteNames: 'indeed', resultsWanted: 10, offset: 0 } } },
   resultSchema
 );
 ```
@@ -152,38 +154,44 @@ const result = await client.request(
 
 #### search_jobs
 
-Searches for jobs across various job listing websites.
+Searches exactly one job source per call. To search several sources, call the tool separately for each source.
+
+MCP arguments use camelCase. The direct `/api` endpoint also accepts snake_case and normalizes it to camelCase.
 
 **Parameters:**
 
 | Parameter | Type | Description | Default |
 |-----------|------|-------------|---------|
-| site_names | string | Comma-separated list of sites (indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri) | "indeed" |
-| search_term | string | Search term for jobs | "software engineer" |
+| siteNames | string or one-item array | **Required. Exactly one of:** indeed, linkedin, zip_recruiter, glassdoor, google, bayt, naukri | — |
+| searchTerm | string | Job title or keywords | "software engineer" |
 | location | string | Location for job search | "remote" |
-| google_search_term | string | Google specific search term | null |
-| results_wanted | integer | Number of results wanted | 20 |
-| hours_old | integer | How many hours old jobs can be | 72 |
-| country_indeed | string | Country for Indeed search | "USA" |
-| linkedin_fetch_description | boolean | Fetch LinkedIn job descriptions (slower) | true |
-| format | string | Output format (json or csv) | "json" |
-| distance | integer | Search radius in miles | 50 |
-| job_type | string | fulltime, parttime, internship, contract | null |
-| is_remote | boolean | Remote jobs only | false |
-| easy_apply | boolean | Jobs hosted on the board site | false |
-| offset | integer | Search result offset | 0 |
-| verbose | integer | 0=errors, 1=warnings, 2=all logs | 2 |
-| linkedin_company_ids | string | Comma-separated LinkedIn company IDs | null |
-| enforce_annual_salary | boolean | Convert wages to annual salary | false |
-| description_format | string | markdown or html | "markdown" |
+| googleSearchTerm | string | Optional Google-specific query | null |
+| resultsWanted | integer | Page size for the selected source (1-10) | 10 |
+| hoursOld | integer | Optional maximum job age; see filter restrictions below | null |
+| countryIndeed | string | Country for Indeed and Glassdoor | "USA" |
+| linkedinFetchDescription | boolean | Fetch LinkedIn descriptions; adds requests and is slower | false |
+| format | string | MCP output format; only `json` is accepted | "json" |
+| distance | integer | Search radius in miles (0-500) | 50 |
+| jobType | string | fulltime, parttime, internship, contract | null |
+| isRemote | boolean | Remote jobs only | false |
+| easyApply | boolean | Jobs hosted on the board site | false |
+| offset | integer | Zero-based offset for supported sources | 0 |
+| verbose | integer | 0=errors, 1=warnings, 2=all logs | 0 |
+| linkedinCompanyIds | string | Comma-separated LinkedIn company IDs | null |
+| enforceAnnualSalary | boolean | Convert wages to annual salary | false |
+| descriptionFormat | string | markdown or html | "markdown" |
 | proxies | string | Comma-separated proxy list | null |
-| ca_cert | string | CA cert path for proxies | null |
-| timeout | integer | Job search timeout in ms | 120000 |
+| caCert | string | CA cert path for proxies | null |
+| timeout | integer | Search timeout in ms (1000-120000) | 120000 |
+
+**Pagination:** begin with `offset: 0`. If the response has `hasMore: true`, repeat the same source and filters with its `nextOffset`. Stop when `hasMore` is false. ZipRecruiter and Bayt only support `offset: 0`; pagination on other sources remains best-effort because JobSpy delegates to changing third-party job boards.
+
+**Filter restrictions:** Indeed accepts only one of `hoursOld`, `easyApply`, or the `jobType`/`isRemote` group. LinkedIn does not accept `hoursOld` together with `easyApply`. Invalid combinations fail immediately with actionable guidance.
 
 **Example usage with Claude:**
 
 ```
-I need to find senior software engineer jobs in Boston posted in the last 24 hours on both LinkedIn and Indeed.
+Find senior software engineer jobs in Boston posted in the last 24 hours. Search LinkedIn and Indeed separately and paginate each source without repeating an offset.
 ```
 
 ## Docker Compose
@@ -202,22 +210,14 @@ npm run dev     # nodemon auto-restart
 npm run lint    # ESLint
 ```
 
-### Test (curl)
+### Test
 
-The `POST /api` endpoint returns results directly (bypasses MCP):
+Run the automated checks:
 
 ```bash
-curl -X POST http://localhost:9423/api \
-  -H "Content-Type: application/json" \
-  -d '{
-    "search_term": "software engineer",
-    "location": "San Francisco, CA",
-    "site_names": "indeed,linkedin",
-    "results_wanted": 5
-  }'
+npm test
+npm run lint
 ```
-
-> **Note**: `npm test` is a placeholder. The test file at `tests/jobSchema.test.js` uses CommonJS `require`/`describe` with no test framework configured and depends on an external `../../jobSpy/jobs.json` file.  
 
 ## License
 

@@ -37,20 +37,31 @@ function makeFakeDocker(body) {
   return { dir, script };
 }
 
-test('siteNames normalizes common MCP client spellings', () => {
+test('siteNames requires and normalizes exactly one source', () => {
   const schema = z.object(searchParams);
 
-  assert.equal(
-    schema.parse({ siteNames: ['LinkedIn', 'ZipRecruiter'] }).siteNames,
-    'linkedin,zip_recruiter',
-  );
-  assert.equal(
-    schema.parse({ siteNames: 'indeed, zip-recruiter, LinkedIn' }).siteNames,
-    'indeed,zip_recruiter,linkedin',
-  );
+  assert.equal(schema.parse({ siteNames: ['LinkedIn'] }).siteNames, 'linkedin');
+  assert.equal(schema.parse({ siteNames: 'ZipRecruiter' }).siteNames, 'zip_recruiter');
   assert.throws(
-    () => schema.parse({ siteNames: 'monster' }),
-    /Invalid site names/,
+    () => schema.parse({ siteNames: 'indeed,linkedin' }),
+    /Exactly one site is required/,
+  );
+  assert.throws(() => schema.parse({ siteNames: 'monster' }), /Invalid site name/);
+  assert.throws(() => schema.parse({}), /Required/);
+});
+
+test('search schema uses bounded request-saving defaults', () => {
+  const parsed = z.object(searchParams).parse({ siteNames: 'indeed' });
+
+  assert.equal(parsed.resultsWanted, 10);
+  assert.equal(parsed.offset, 0);
+  assert.equal(parsed.hoursOld, null);
+  assert.equal(parsed.linkedinFetchDescription, false);
+  assert.equal(parsed.verbose, 0);
+  assert.equal(parsed.format, 'json');
+  assert.throws(
+    () => z.object(searchParams).parse({ siteNames: 'indeed', resultsWanted: 11 }),
+    /less than or equal to 10/,
   );
 });
 
@@ -95,12 +106,48 @@ printf '%s\n' '[{"site":"indeed","job_url":"https://example.com/job","date_poste
     );
 
     assert.equal(result.count, 1);
+    assert.equal(result.source, 'indeed');
+    assert.equal(result.offset, 0);
+    assert.equal(result.pageSize, 1);
+    assert.equal(result.returned, 1);
+    assert.equal(result.paginationSupported, true);
+    assert.equal(result.hasMore, true);
+    assert.equal(result.nextOffset, 1);
     assert.equal(result.jobs[0].site, 'indeed');
     assert.equal(result.jobs[0].jobUrl, 'https://example.com/job');
     assert.equal(result.jobs[0].datePosted, '2024-09-04T16:00:00.000Z');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('searchJobsHandler rejects unsupported or conflicting pagination before spawning', async () => {
+  await assert.rejects(
+    () => searchJobsHandler({
+      siteNames: 'zip_recruiter',
+      searchTerm: 'engineer',
+      offset: 10,
+    }),
+    /does not support offset pagination/,
+  );
+  await assert.rejects(
+    () => searchJobsHandler({
+      siteNames: 'indeed',
+      searchTerm: 'engineer',
+      hoursOld: 24,
+      isRemote: true,
+    }),
+    /Indeed accepts only one filter group/,
+  );
+  await assert.rejects(
+    () => searchJobsHandler({
+      siteNames: 'linkedin',
+      searchTerm: 'engineer',
+      hoursOld: 24,
+      easyApply: true,
+    }),
+    /LinkedIn does not support hoursOld and easyApply together/,
+  );
 });
 
 test('searchJobsHandler surfaces stderr and exit code on child failure', async () => {

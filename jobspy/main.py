@@ -11,8 +11,8 @@ def parse_args():
                         help='Comma-separated list of sites to scrape: indeed,linkedin,zip_recruiter,glassdoor,google,bayt,naukri')
     parser.add_argument('--search_term', default="software engineer", 
                         help='Search term for jobs')
-    parser.add_argument('--google_search_term', default="software engineer jobs near San Francisco, CA since yesterday", 
-                        help='Google specific search term')
+    parser.add_argument('--google_search_term', default=None,
+                        help='Optional Google-specific query; defaults to search term and filters')
     parser.add_argument('--location', default="San Francisco, CA", 
                         help='Location for job search')
     parser.add_argument('--distance', type=int, default=50,

@@ -41,9 +41,10 @@ npm run lint            # ESLint flat config (eslint.config.cjs)
 - **.env is committed** with defaults (`ENABLE_SSE=1`, `JOBSPY_PORT=9423`).
 - **Tests require external data** at `../../jobSpy/jobs.json` (relative to the repo root, from the system prompt — outside this repo).
 - **VS Code settings** (`settings.json`) reference `.eslintrc.json` but the actual config is `eslint.config.cjs` (ESLint flat config). The settings are stale.
-- **`searchJobsHandler` filters out `0` and `""` values** from params before validation (line 154-166 of `search-jobs.js`), which means `resultsWanted: 0` and `hoursOld: 0` are silently stripped. However, the Zod schema transforms `0` back to defaults (20 and 72 respectively).
+- **`search_jobs` accepts exactly one source per call.** `resultsWanted` is a bounded page size (1-10), and supported sources paginate using the response's `nextOffset`. ZipRecruiter and Bayt reject offsets above zero because upstream JobSpy ignores them.
+- **Safe scraper defaults differ from upstream JobSpy:** `hoursOld` is optional, LinkedIn description fetching is off, verbosity is 0, and MCP output is always JSON. These defaults avoid conflicting filters, extra LinkedIn requests, and JSON parse failures.
 - **Progress notifications** only work in SSE mode (via `sseManager.notificationProgress`), not stdio.
-- **No typecheck** step exists — only lint.
+- **No typecheck** step exists — verification is `npm test` plus `npm run lint`.
 - **Lint**: `eslint src/` (ESLint 9 flat config). Fix with `npm run lint:fix`.
 - **`jobspy-scraper` compose service uses `command: tail -f /dev/null`** — it stays alive as a no-op so the Docker socket-based `docker run --rm jobspy` calls from the Node server work. It does NOT run `main.py` on startup.
 - **`restart: unless-stopped`** is set on `jobspy-mcp-server` in compose.yaml. The `depends_on` was removed — the Node server calls the scraper image on-demand via the Docker socket, it doesn't need the scraper container running.

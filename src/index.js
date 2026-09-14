@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import express from 'express';
 import cors from 'cors';
+import changeCase from 'change-case-object';
 import logger from './logger.js';
 import SseManager from './sseManager.js';
 import {
@@ -84,7 +85,9 @@ async function runServer() {
 
     app.post('/api', async (req, res) => {
       try {
-        const data = await searchJobsHandler(req.body);
+        // The direct HTTP API accepts conventional snake_case keys while the
+        // MCP schema advertises camelCase. Normalize both forms to one handler.
+        const data = await searchJobsHandler(changeCase.camelCase(req.body));
         res.json(data);
       } catch (error) {
         logger.error('Error in /api searchJobsHandler', {
