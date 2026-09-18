@@ -21,10 +21,14 @@ services:
     ports:
       - "${JOBSPY_PORT:-9423}:9423"
     env_file: .env
+    environment:
+      JOBSPY_STATE_PATH: /data/jobspy-state.json
     working_dir: /app
     volumes:
       # Docker socket so the MCP server can exec the prebuilt scraper container.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Description/applicant caches, source throttle state, seen jobs, and apply log.
+      - jobspy-data:/data
     command: ["node", "src/index.js"]
     networks:
       - jobspy-network
@@ -32,3 +36,6 @@ services:
 networks:
   jobspy-network:
     driver: bridge
+
+volumes:
+  jobspy-data:

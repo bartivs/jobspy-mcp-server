@@ -7,6 +7,7 @@ import path from 'node:path';
 import { z } from 'zod';
 
 import { searchParams } from '../src/schemas/searchParamsSchema.js';
+import { JobStore } from '../src/state/store.js';
 import {
   buildCommandArgs,
   searchJobsHandler,
@@ -51,12 +52,15 @@ test('siteNames requires and normalizes exactly one source', () => {
 });
 
 test('search schema uses bounded request-saving defaults', () => {
-  const parsed = z.object(searchParams).parse({ siteNames: 'indeed' });
+  const schema = z.object(searchParams);
+  const parsed = schema.parse({ siteNames: 'indeed' });
 
   assert.equal(parsed.resultsWanted, 10);
   assert.equal(parsed.offset, 0);
   assert.equal(parsed.hoursOld, null);
-  assert.equal(parsed.linkedinFetchDescription, false);
+  assert.equal(parsed.withDescription, true);
+  assert.equal(parsed.linkedinFetchDescription, true);
+  assert.equal(schema.parse({ siteNames: 'linkedin', withDescription: false }).withDescription, false);
   assert.equal(parsed.verbose, 0);
   assert.equal(parsed.format, 'json');
   assert.throws(
@@ -87,6 +91,8 @@ test('buildCommandArgs keeps multi-word values as single argv entries', () => {
     'json',
   ]);
   assert.equal(args.some((arg) => arg.includes('"')), false);
+  assert.ok(buildCommandArgs({ linkedinFetchDescription: true }).includes('--linkedin_fetch_description'));
+  assert.equal(buildCommandArgs({ linkedinFetchDescription: false }).includes('--linkedin_fetch_description'), false);
 });
 
 test('searchJobsHandler returns parsed jobs from child stdout', async () => {
@@ -102,7 +108,7 @@ printf '%s\n' '[{"site":"indeed","job_url":"https://example.com/job","date_poste
         location: 'remote',
         resultsWanted: 1,
         timeout: 1000,
-      }),
+      }, { store: new JobStore(path.join(dir, 'state.json')) }),
     );
 
     assert.equal(result.count, 1);
@@ -116,6 +122,103 @@ printf '%s\n' '[{"site":"indeed","job_url":"https://example.com/job","date_poste
     assert.equal(result.jobs[0].site, 'indeed');
     assert.equal(result.jobs[0].jobUrl, 'https://example.com/job');
     assert.equal(result.jobs[0].datePosted, '2024-09-04T16:00:00.000Z');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('LinkedIn descriptions and applicant counts are cached and failures are explicit', async () => {
+  const { dir, script } = makeFakeDocker(`#!/bin/sh
+COUNT_FILE="$0.count"
+printf '%s\n' "$*" >> "$0.args"
+if [ -f "$COUNT_FILE" ]; then
+  printf '%s\n' '[{"site":"linkedin","job_url":"https://www.linkedin.com/jobs/view/backend-12345","title":"Engineer","company":"Acme","description":null}]'
+else
+  touch "$COUNT_FILE"
+  printf '%s\n' '[{"site":"linkedin","job_url":"https://www.linkedin.com/jobs/view/backend-12345","title":"Engineer","company":"Acme","description":"Cached description"}]'
+fi
+`);
+  const store = new JobStore(path.join(dir, 'state.json'));
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    return new Response('<html>Be among the first 25 applicants · 3 hours ago</html>');
+  };
+
+  try {
+    const first = await withEnv('DOCKER_CMD', script, () => searchJobsHandler({
+      siteNames: 'linkedin',
+      searchTerm: 'backend',
+      location: 'remote',
+      resultsWanted: 1,
+      timeout: 1000,
+    }, { store, fetchImpl }));
+    const second = await withEnv('DOCKER_CMD', script, () => searchJobsHandler({
+      siteNames: 'linkedin',
+      searchTerm: 'platform',
+      location: 'remote',
+      resultsWanted: 1,
+      timeout: 1000,
+      withDescription: false,
+    }, { store, fetchImpl }));
+
+    assert.equal(first.jobs[0].descriptionFetchFailed, false);
+    assert.equal(first.jobs[0].applicantCount, 25);
+    assert.equal(first.jobs[0].isApplicantThreshold, true);
+    assert.equal(second.jobs[0].description, 'Cached description');
+    assert.equal(second.jobs[0].descriptionFetchFailed, false);
+    assert.equal(fetchCalls, 1);
+    const commandLines = fs.readFileSync(`${script}.args`, 'utf8').trim().split('\n');
+    assert.match(commandLines[0], /--linkedin_fetch_description/);
+    assert.doesNotMatch(commandLines[1], /--linkedin_fetch_description/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('missing requested LinkedIn description is flagged without failing the search', async () => {
+  const { dir, script } = makeFakeDocker(`#!/bin/sh
+printf '%s\n' '[{"site":"linkedin","job_url":"https://linkedin.com/jobs/view/999","description":null}]'
+`);
+  const store = new JobStore(path.join(dir, 'state.json'));
+  try {
+    const result = await withEnv('JOBSPY_AUTO_ENRICH_APPLICANTS', 'false', () => withEnv(
+      'DOCKER_CMD',
+      script,
+      () => searchJobsHandler({
+        siteNames: 'linkedin', searchTerm: 'backend', location: 'remote', timeout: 1000,
+      }, { store }),
+    ));
+    assert.equal(result.jobs[0].description, null);
+    assert.equal(result.jobs[0].descriptionFetchFailed, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('empty-result circuit opens after two distinct terms and persists', async () => {
+  const { dir, script } = makeFakeDocker(`#!/bin/sh
+printf '%s\n' '[]'
+`);
+  const statePath = path.join(dir, 'state.json');
+  const store = new JobStore(statePath);
+
+  try {
+    const first = await withEnv('DOCKER_CMD', script, () => searchJobsHandler({
+      siteNames: 'glassdoor', searchTerm: 'python', location: 'Paraguay', timeout: 1000,
+    }, { store }));
+    const second = await withEnv('DOCKER_CMD', script, () => searchJobsHandler({
+      siteNames: 'glassdoor', searchTerm: 'golang', location: 'Paraguay', timeout: 1000,
+    }, { store }));
+    const skipped = await searchJobsHandler({
+      siteNames: 'glassdoor', searchTerm: 'java', location: 'Paraguay', timeout: 1000,
+    }, { store: new JobStore(statePath) });
+
+    assert.equal(first.circuitOpen, false);
+    assert.equal(second.circuitOpen, true);
+    assert.equal(second.throttleScore, 50);
+    assert.equal(skipped.skipped, true);
+    assert.equal(skipped.jobs.length, 0);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

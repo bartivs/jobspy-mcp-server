@@ -1,8 +1,12 @@
 import logger from '../logger.js';
 import { searchParams } from '../schemas/searchParamsSchema.js';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import changeCase from 'change-case-object';
+
+import { getJobStore } from '../state/store.js';
+import { extractApplicantCountHandler, extractLinkedInJobId } from './applicant-count.js';
 
 /**
  * @typedef {Object} JobSearchParams
@@ -20,7 +24,8 @@ import changeCase from 'change-case-object';
  * @property {number} [verbose] - Controls verbosity (0=errors only, 1=errors+warnings, 2=all logs)
  * @property {string} [countryIndeed] - Country code for Indeed search
  * @property {boolean} [isRemote] - Whether to search for remote jobs only
- * @property {boolean} [linkedinFetchDescription] - Whether to fetch LinkedIn job descriptions
+ * @property {boolean} [withDescription] - Whether to fetch LinkedIn job descriptions (default true)
+ * @property {boolean} [linkedinFetchDescription] - Deprecated alias for withDescription
  * @property {string} [linkedinCompanyIds] - Searches for linkedin jobs with specific company ids
  * @property {boolean} [enforceAnnualSalary] - Converts wages to annual salary
  * @property {string} [proxies] - Comma-separated list of proxies
@@ -201,7 +206,23 @@ export function validateSiteSpecificParams(params) {
  * @param {JobSearchParams} params - Search parameters
  * @returns {Promise<object>} Search results
  */
-export async function searchJobsHandler(params) {
+function stableJobId(job, source) {
+  const jobUrl = job.jobUrl || job.jobUrlDirect || '';
+  const linkedInId = source === 'linkedin' ? extractLinkedInJobId(jobUrl) : null;
+  if (linkedInId) {
+    return linkedInId;
+  }
+  if (job.id || job.jobId) {
+    return `${source}:${job.id || job.jobId}`;
+  }
+  if (jobUrl) {
+    const digest = crypto.createHash('sha256').update(jobUrl).digest('hex').slice(0, 20);
+    return `${source}:url:${digest}`;
+  }
+  return null;
+}
+
+export async function searchJobsHandler(params, dependencies = {}) {
   let result;
   try {
     logger.info('Starting job search with parameters', { params });
@@ -219,7 +240,36 @@ export async function searchJobsHandler(params) {
     logger.info('Cleaned parameters', { cleanedParams });
 
     const validatedParams = z.object(searchParams).parse(cleanedParams);
+    validatedParams.linkedinFetchDescription = Object.hasOwn(cleanedParams, 'withDescription')
+      ? validatedParams.withDescription
+      : validatedParams.linkedinFetchDescription;
     validateSiteSpecificParams(validatedParams);
+
+    const store = dependencies.store || getJobStore();
+    if (store.shouldSkipSource(validatedParams.siteNames, validatedParams.location)) {
+      const throttle = store.getThrottle(validatedParams.siteNames, validatedParams.location);
+      logger.warn('Skipping source with open circuit breaker', {
+        source: validatedParams.siteNames,
+        location: validatedParams.location,
+        openUntil: throttle.openUntil,
+      });
+      return {
+        count: 0,
+        message: 'Source skipped because its empty-result circuit breaker is open',
+        source: validatedParams.siteNames,
+        offset: validatedParams.offset,
+        pageSize: validatedParams.resultsWanted,
+        returned: 0,
+        paginationSupported: !['zip_recruiter', 'bayt'].includes(validatedParams.siteNames),
+        hasMore: false,
+        nextOffset: null,
+        skipped: true,
+        circuitOpen: true,
+        throttleScore: throttle.throttleScore,
+        openUntil: throttle.openUntil,
+        jobs: [],
+      };
+    }
 
     logger.info('Validated parameters', { validatedParams });
 
@@ -268,7 +318,7 @@ export async function searchJobsHandler(params) {
     }
 
     // Convert to camelCase and normalize date fields to ISO 8601
-    const data = parsedData.map((job) => {
+    let data = parsedData.map((job) => {
       const jobCamelCase = changeCase.camelCase(job);
 
       // Convert date fields to ISO 8601
@@ -276,8 +326,56 @@ export async function searchJobsHandler(params) {
         jobCamelCase.datePosted = convertToISODate(jobCamelCase.datePosted);
       }
 
+      const jobId = stableJobId(jobCamelCase, validatedParams.siteNames);
+      if (jobId) {
+        jobCamelCase.jobId = jobId;
+      }
+      if (validatedParams.siteNames === 'linkedin') {
+        if (jobCamelCase.description && jobId) {
+          store.setDescription(jobId, jobCamelCase.description);
+        } else if (jobId) {
+          jobCamelCase.description = store.getDescription(jobId);
+        }
+        jobCamelCase.descriptionFetchFailed = Boolean(
+          validatedParams.linkedinFetchDescription && !jobCamelCase.description,
+        );
+      }
       return jobCamelCase;
     });
+
+    if (
+      validatedParams.siteNames === 'linkedin' &&
+      String(process.env.JOBSPY_AUTO_ENRICH_APPLICANTS || 'true').toLowerCase() !== 'false'
+    ) {
+      data = await enrichLinkedInApplicants(data, {
+        store,
+        fetchImpl: dependencies.fetchImpl,
+        maxConcurrent: Number(process.env.JOBSPY_APPLICANT_CONCURRENCY || 3),
+      });
+    }
+
+    const cooldownMs = Number(process.env.JOBSPY_CIRCUIT_COOLDOWN_MS || 21600000);
+    const throttle = store.recordSourceResult({
+      source: validatedParams.siteNames,
+      location: validatedParams.location,
+      searchTerm: validatedParams.searchTerm,
+      count: data.length,
+      cooldownMs,
+    });
+
+    for (const job of data) {
+      const jobId = job.jobId;
+      if (!jobId) {
+        continue;
+      }
+      store.upsertJob({
+        jobId: String(jobId),
+        url: job.jobUrl || job.jobUrlDirect || '',
+        company: job.company || '',
+        role: job.title || '',
+        applicantCount: job.applicantCount ?? null,
+      });
+    }
 
     const paginationSupported = !['zip_recruiter', 'bayt'].includes(
       validatedParams.siteNames,
@@ -299,6 +397,10 @@ export async function searchJobsHandler(params) {
       paginationSupported,
       hasMore,
       nextOffset,
+      skipped: false,
+      circuitOpen: Boolean(throttle.openUntil),
+      throttleScore: throttle.throttleScore,
+      openUntil: throttle.openUntil,
       jobs: data,
     };
   } catch (error) {
@@ -315,6 +417,50 @@ export async function searchJobsHandler(params) {
     });
     throw error;
   }
+}
+
+async function enrichLinkedInApplicants(jobs, options) {
+  const concurrency = Math.max(1, Math.min(10, options.maxConcurrent || 3));
+  const output = new Array(jobs.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < jobs.length) {
+      const index = cursor;
+      cursor += 1;
+      const job = jobs[index];
+      const jobUrl = job.jobUrl || job.jobUrlDirect;
+      if (!jobUrl) {
+        output[index] = { ...job, applicantCount: null, postedAgeHours: null, isApplicantThreshold: false, applicantFetchFailed: true };
+        continue;
+      }
+      try {
+        const applicant = await extractApplicantCountHandler(
+          { jobUrl },
+          { store: options.store, fetchImpl: options.fetchImpl },
+        );
+        output[index] = {
+          ...job,
+          applicantCount: applicant.applicantCount,
+          postedAgeHours: applicant.postedAgeHours,
+          isApplicantThreshold: applicant.isThreshold,
+          applicantFetchFailed: false,
+        };
+      } catch (error) {
+        logger.warn('LinkedIn applicant enrichment failed', { jobUrl, error: error.message });
+        output[index] = {
+          ...job,
+          applicantCount: null,
+          postedAgeHours: null,
+          isApplicantThreshold: false,
+          applicantFetchFailed: true,
+        };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()));
+  return output;
 }
 
 /**

@@ -10,7 +10,13 @@ import {
   jobRecommendationsPrompt,
   resumeFeedbackPrompt,
 } from './prompts/index.js';
-import { searchJobsTool, searchJobsHandler } from './tools/index.js';
+import {
+  atsBoardTools,
+  extractApplicantCountTool,
+  searchJobsTool,
+  searchJobsHandler,
+  storeTools,
+} from './tools/index.js';
 
 const PORT = process.env.JOBSPY_PORT || 9423;
 const HOST = process.env.JOBSPY_HOST || '0.0.0.0';
@@ -34,6 +40,9 @@ function createMcpServer() {
   jobRecommendationsPrompt(server);
   resumeFeedbackPrompt(server);
   searchJobsTool(server, sseManager);
+  extractApplicantCountTool(server);
+  atsBoardTools(server);
+  storeTools(server);
   return server;
 }
 

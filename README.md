@@ -9,6 +9,10 @@ A Model Context Protocol (MCP) server that enables AI assistants like Claude to 
 - Page supported sources with explicit `offset`, `nextOffset`, and `hasMore` metadata
 - Filter by search terms, location, time frames, and more
 - Get structured JSON job data that AI models can easily process
+- Fetch LinkedIn descriptions by default, cache descriptions/applicant counts for six hours, and expose failed enrichment explicitly
+- Learn empty/throttled source-location combinations with a persistent circuit breaker
+- Query Greenhouse, Lever, Ashby, Workable, and SmartRecruiters public boards directly
+- Persist seen jobs, applications, source health, and resume hashes across runs
 - Multiple transport options: stdio for Claude integration, SSE for web clients
 
 ## Prerequisites
@@ -41,6 +45,10 @@ docker compose build jobspy-scraper
 | `JOBSPY_HOST`         | HTTP server host (SSE mode)          | `0.0.0.0`          |
 | `JOBSPY_DOCKER_IMAGE` | Docker image tag for JobSpy scraper  | `jobspy`           |
 | `LOG_LEVEL`           | Winston log level                    | `info`             |
+| `JOBSPY_STATE_PATH`   | Persistent JSON state/cache path     | `data/jobspy-state.json` |
+| `JOBSPY_CIRCUIT_COOLDOWN_MS` | Empty-source circuit cooldown | `21600000` (6h) |
+| `JOBSPY_AUTO_ENRICH_APPLICANTS` | Enrich LinkedIn rows automatically | `true` |
+| `JOBSPY_APPLICANT_CONCURRENCY` | Concurrent LinkedIn page fetches | `3` |
 
 Defaults are in `.env` (committed).
 
@@ -169,7 +177,8 @@ MCP arguments use camelCase. The direct `/api` endpoint also accepts snake_case 
 | resultsWanted | integer | Page size for the selected source (1-10) | 10 |
 | hoursOld | integer | Optional maximum job age; see filter restrictions below | null |
 | countryIndeed | string | Country for Indeed and Glassdoor | "USA" |
-| linkedinFetchDescription | boolean | Fetch LinkedIn descriptions; adds requests and is slower | false |
+| withDescription | boolean | Fetch LinkedIn descriptions; set false to opt out | true |
+| linkedinFetchDescription | boolean | Deprecated alias for withDescription | true |
 | format | string | MCP output format; only `json` is accepted | "json" |
 | distance | integer | Search radius in miles (0-500) | 50 |
 | jobType | string | fulltime, parttime, internship, contract | null |
@@ -187,6 +196,15 @@ MCP arguments use camelCase. The direct `/api` endpoint also accepts snake_case 
 **Pagination:** begin with `offset: 0`. If the response has `hasMore: true`, repeat the same source and filters with its `nextOffset`. Stop when `hasMore` is false. ZipRecruiter and Bayt only support `offset: 0`; pagination on other sources remains best-effort because JobSpy delegates to changing third-party job boards.
 
 **Filter restrictions:** Indeed accepts only one of `hoursOld`, `easyApply`, or the `jobType`/`isRemote` group. LinkedIn does not accept `hoursOld` together with `easyApply`. Invalid combinations fail immediately with actionable guidance.
+
+### Additional tools
+
+- `extract_applicant_count(jobUrl)` returns `jobId`, `applicantCount`, `postedAgeHours`, and `isThreshold`.
+- `get_greenhouse_jobs`, `get_lever_jobs`, `get_ashby_jobs`, `get_workable_jobs`, and `get_smartrecruiters_jobs` proxy public first-party job-board APIs into one stable shape.
+- `store_upsert_job`, `store_mark_applied`, and `store_get_unapplied_for_company` provide cross-run job/apply memory.
+- `store_update_profile_snapshot` SHA-256 hashes resume text and reports whether it changed.
+
+LinkedIn search results are automatically enriched with applicant data. Page-fetch failures are isolated per job through `applicantFetchFailed`; missing requested descriptions use `descriptionFetchFailed`. Two empty searches with different terms open a persistent source/location circuit for the configured cooldown and subsequent calls return `skipped: true` without spawning JobSpy.
 
 **Example usage with Claude:**
 

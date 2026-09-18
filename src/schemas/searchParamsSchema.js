@@ -138,21 +138,16 @@ export const searchParams = {
       return Boolean(val);
     })
     .default(false),
+  withDescription: z
+    .boolean()
+    .describe('Fetch LinkedIn descriptions. Defaults to true; set false for a faster search.')
+    .default(true),
   linkedinFetchDescription: z
-    .any()
+    .boolean()
     .describe(
-      'Whether to fetch LinkedIn job descriptions (slower). Accepts any truthy value.',
+      'Deprecated alias for withDescription. LinkedIn description fetching defaults to true.',
     )
-    .transform((val) => {
-      // Convert any truthy value to boolean
-      if (typeof val === 'string') {
-        // For strings, check for common "true" values
-        return ['true', 'yes', '1', 'on', 'y'].includes(val.toLowerCase());
-      }
-      // For other types, use Boolean conversion
-      return Boolean(val);
-    })
-    .default(false),
+    .default(true),
   linkedinCompanyIds: z
     .union([
       z.string().describe('Comma-separated list of LinkedIn company IDs'),
